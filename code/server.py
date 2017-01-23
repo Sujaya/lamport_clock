@@ -194,7 +194,7 @@ class ClientThread(Thread):
 
 
 	def handleReleaseMsg(self, dcId, noOfTickets):
-		self.mutexinfo.totalTickets = noOfTickets
+		self.mutexinfo.totalTickets = min(self.mutexinfo.totalTickets, noOfTickets)
 		#pop dcid from queue
 		self.mutexinfo.prQueue.pop(0)
 		if self.mutexinfo.waitingForRelease:
