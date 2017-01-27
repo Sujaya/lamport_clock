@@ -7,19 +7,30 @@ import json, sys
 import logging
 import sys
 
+
+with open('server_config.json') as config_file:    
+    config = json.load(config_file)
+selfDcId = sys.argv[1]
+
+dcInfo= {'dc_name':selfDcId.upper()}
+
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
-ch = logging.StreamHandler(sys.stdout)
-ch.setLevel(logging.DEBUG)
+ch = logging.StreamHandler()
+formatter = logging.Formatter('%(dc_name)s: %(message)s')
+ch.setFormatter(formatter)
 logger.addHandler(ch)
-delay = 2
+logger = logging.LoggerAdapter(logger, dcInfo)
+
+
 REQ = 'REQ'
 REL = 'REL'
 REP = 'REP'
 CLIREQ = 'CLIREQ'
-with open('server_config.json') as config_file:    
-    config = json.load(config_file)
+
+
+delay = config['delay']
 
 
 class MutexInfo:
@@ -33,7 +44,6 @@ class MutexInfo:
 		self.selfDcId = selfDcId
 		self.requestedNoOfTickets = 0
 		self.clientConn = conn
-
 
 
 	def comparator(self, tup1, tup2):
@@ -59,7 +69,8 @@ class ClientThread(Thread):
 	def run(self): 
 		cliReq = False
 		conn, recvMsg = self.conn, self.conn.recv(2048)
-		print "Server received data:", recvMsg
+		logMsg = 'Received message from: (%s:%d). Message is: %s' %(self.ip, self.port, recvMsg)
+		logger.debug(logMsg)
 
 		msgType, dcId, noOfTickets, clock = self.parseRecvMsg(recvMsg)
 		self.updateClock(self.mutexinfo.clock['seqNo'], clock['seqNo'])
@@ -110,11 +121,16 @@ class ClientThread(Thread):
 		logMsg = 'Updated queue to %s' %repr(self.mutexinfo.prQueue)
 		logger.debug(logMsg)
 
+	def popAndUpdateQueue(self):
+		self.mutexinfo.prQueue.pop(0)
+		logMsg = 'Updated queue to %s' %repr(self.mutexinfo.prQueue)
+		logger.debug(logMsg)
+
 
 	def handleClientReq(self, noOfTickets):
 		self.mutexinfo.clientConn = self.conn
 		if self.mutexinfo.totalTickets - noOfTickets < 0:
-			self.replyToClient(success=False)
+			self.replyToClient(self.mutexinfo.totalTickets, success=False)
 			return
 
 		self.mutexinfo.requestedNoOfTickets = noOfTickets
@@ -141,50 +157,54 @@ class ClientThread(Thread):
 		
 		if self.mutexinfo.totalDCs == 1:
 			self.accessTickets()
-	
+
+	def resetVariables(self):
+		#reset all variables
+		self.mutexinfo.requestedNoOfTickets = 0
+		self.mutexinfo.waitingForRelease = False
+		self.mutexinfo.totalDCs = len(config['datacenters'])
+
 
 	def accessTickets(self):
 		
+		# Check for top of Queue; if I am at top, reduct tickets value
 		if self.mutexinfo.prQueue[0][0] == self.mutexinfo.selfDcId:
-			if self.mutexinfo.totalTickets - self.mutexinfo.requestedNoOfTickets < 0:
-				self.replyToClient(success=False)
-				return
-			# Check for top of Queue; if I am at top, reduct tickets value
-			self.mutexinfo.totalTickets -= self.mutexinfo.requestedNoOfTickets
-			logMsg = 'Updated tickets value to %d' %self.mutexinfo.totalTickets
-			logger.debug(logMsg)
+			success = False
+			if self.mutexinfo.totalTickets - self.mutexinfo.requestedNoOfTickets >= 0:
+				self.mutexinfo.totalTickets -= self.mutexinfo.requestedNoOfTickets
+				logMsg = 'Updated tickets value to %d' %self.mutexinfo.totalTickets
+				logger.debug(logMsg)
+				success = True
 
-			#reset all variables
-			self.mutexinfo.requestedNoOfTickets = 0
-			self.mutexinfo.waitingForRelease = False
-			self.mutexinfo.totalDCs = len(config['datacenters'])
-			#release to other DCs
-			self.mutexinfo.prQueue.pop(0)
-			self.sendReleaseMsg()
+			currTickets = self.mutexinfo.totalTickets
+
+			self.resetVariables()
+			#pop from mine and release to other DCs
+			self.popAndUpdateQueue()
+			self.sendReleaseMsg(currTickets)
 
 			#reply to client
-			self.replyToClient(success=True)
+			self.replyToClient(currTickets, success=success)
 		else:
 			logMsg = 'Waiting for other DCs to release.'
 			logger.debug(logMsg)
 			self.mutexinfo.waitingForRelease = True
 
 
-	def replyToClient(self, success):
+	def replyToClient(self, currTickets, success):
 		if not success:
-			cliReply = 'Total tickets available: '+str(self.mutexinfo.totalTickets)+'. Tickets requested should be less that total tickets available.'
+			cliReply = 'Total tickets available: '+str(currTickets)+'. Tickets requested should be less that total tickets available.'
 			 			
 		else:
-			cliReply = 'Successfully purchased tickets. Total remaining tickes are ' +str(self.mutexinfo.totalTickets)
+			cliReply = 'Successfully purchased tickets. Total remaining tickes are ' +str(currTickets)
 			 			
 		self.mutexinfo.clientConn.send(cliReply)
 		self.mutexinfo.clientConn.close()
 		self.mutexinfo.clientConn = None
 
 
-	def sendReleaseMsg(self):
+	def sendReleaseMsg(self, tickets):
 		clock = dict(self.mutexinfo.clock)
-		tickets = self.mutexinfo.totalTickets
 		for dcId in config["datacenters"]:
 			if dcId == self.mutexinfo.selfDcId:
 				continue
@@ -195,15 +215,17 @@ class ClientThread(Thread):
 
 	def handleReleaseMsg(self, dcId, noOfTickets):
 		self.mutexinfo.totalTickets = min(self.mutexinfo.totalTickets, noOfTickets)
+		logMsg = 'Received updated ticket value. Updating tickets value to %d' %self.mutexinfo.totalTickets
+		logger.debug(logMsg)
 		#pop dcid from queue
-		self.mutexinfo.prQueue.pop(0)
+		self.popAndUpdateQueue()
 		if self.mutexinfo.waitingForRelease:
 			self.accessTickets()
 
 ######################################## Main ################################################
 
 
-selfDcId = sys.argv[1]
+
 ip, port = config["datacenters"][selfDcId][0], config["datacenters"][selfDcId][1]
 
 tcpServer = socket.socket(socket.AF_INET, socket.SOCK_STREAM) 
