@@ -77,7 +77,8 @@ class ClientThread(Thread):
 
 		if msgType==CLIREQ:
 			cliReq = True
-			self.handleClientReq(noOfTickets)
+			clock = dict(self.mutexinfo.clock)
+			self.handleClientReq(noOfTickets, clock)
 		elif msgType == REQ:
 			self.handleDatacenterReq(dcId, noOfTickets, clock)
 		elif msgType == REP:
@@ -127,14 +128,14 @@ class ClientThread(Thread):
 		logger.debug(logMsg)
 
 
-	def handleClientReq(self, noOfTickets):
+	def handleClientReq(self, noOfTickets, clock):
 		self.mutexinfo.clientConn = self.conn
 		if self.mutexinfo.totalTickets - noOfTickets < 0:
 			self.replyToClient(self.mutexinfo.totalTickets, success=False)
 			return
 
 		self.mutexinfo.requestedNoOfTickets = noOfTickets
-		clock = dict(self.mutexinfo.clock)
+		
 		self.addAndUpdateQueue(self.mutexinfo.selfDcId, clock)
 		for dcId in config["datacenters"]:
 			if dcId == self.mutexinfo.selfDcId:
